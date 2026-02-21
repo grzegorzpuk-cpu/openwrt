@@ -3,24 +3,28 @@ name: Build OpenWrt
 on:
   workflow_dispatch:
     inputs:
+      openwrt_version:
+        description: 'Wersja OpenWrt (tag git, np. v22.03.7, v23.05.5)'
+        required: true
+        default: 'v22.03.7'
       target:
-        description: 'Target (np. ath79, x86, ramips, mediatek)'
+        description: 'Target (np. ramips, ath79, x86, mediatek)'
         required: true
-        default: 'x86'
+        default: 'ramips'
       subtarget:
-        description: 'Subtarget (np. 64, generic, mt7621, filogic)'
+        description: 'Subtarget (np. mt76x8, mt7621, generic, 64)'
         required: true
-        default: '64'
+        default: 'mt76x8'
       profile:
-        description: 'Profil urzÄ…dzenia (np. generic, tplink_archer-c7-v2). Zostaw "generic" jeĹ›li nie wiesz.'
+        description: 'Profil urzÄ…dzenia (np. tplink_tl-wr841n-v13)'
         required: true
-        default: 'generic'
+        default: 'tplink_tl-wr841n-v13'
       extra_packages:
-        description: 'Dodatkowe pakiety oddzielone spacjÄ… (np. luci htop nano). Zostaw puste jeĹ›li nie potrzeba.'
+        description: 'Dodatkowe pakiety oddzielone spacjÄ… (np. luci htop). Zostaw puste jeĹ›li nie potrzeba.'
         required: false
         default: ''
       create_release:
-        description: 'Czy utworzyÄ‡ GitHub Release z firmware? (true/false)'
+        description: 'Czy utworzyÄ‡ GitHub Release z firmware?'
         required: true
         default: 'false'
         type: choice
@@ -29,20 +33,24 @@ on:
           - 'true'
 
 env:
+  VERSION: ${{ github.event.inputs.openwrt_version }}
   TARGET: ${{ github.event.inputs.target }}
   SUBTARGET: ${{ github.event.inputs.subtarget }}
   PROFILE: ${{ github.event.inputs.profile }}
 
 jobs:
   build:
-    name: Build OpenWrt (${{ github.event.inputs.target }}/${{ github.event.inputs.subtarget }})
+    name: "OpenWrt ${{ github.event.inputs.openwrt_version }} | ${{ github.event.inputs.target }}/${{ github.event.inputs.subtarget }} | ${{ github.event.inputs.profile }}"
     runs-on: ubuntu-22.04
-    
+
     steps:
-      - name: Checkout repozytorium
+      - name: Checkout OpenWrt ${{ env.VERSION }}
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          # UĹĽyj oficjalnego tagu wersji - branch main forks nie zawiera poprawek stabilnych
+          repository: openwrt/openwrt
+          ref: ${{ env.VERSION }}
+          fetch-depth: 1
 
       - name: Instalacja zaleĹĽnoĹ›ci systemowych
         run: |
@@ -53,114 +61,96 @@ jobs:
             libssl-dev python3-distutils rsync unzip zlib1g-dev \
             file wget qemu-utils
 
-      - name: Konfiguracja wolnego miejsca na dysku
+      - name: Zwolnienie miejsca na dysku (~20 GB)
         run: |
-          sudo df -h
-          # UsuĹ„ niepotrzebne pakiety aby zyskaÄ‡ miejsce (~20GB)
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
-          sudo apt-get autoremove -y
-          sudo apt-get clean
-          sudo df -h
+          sudo apt-get autoremove -y && sudo apt-get clean
+          df -h
 
       - name: Aktualizacja i instalacja feedĂłw
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Generowanie .config z profilu
+      - name: Generowanie .config
         run: |
-          echo "CONFIG_TARGET_${TARGET}=y" > .config
-          echo "CONFIG_TARGET_${TARGET}_${SUBTARGET}=y" >> .config
-          echo "CONFIG_TARGET_${TARGET}_${SUBTARGET}_DEVICE_${PROFILE}=y" >> .config
-          
-          # Dodaj dodatkowe pakiety jeĹ›li podane
+          # Ustaw target, subtarget i profil urzÄ…dzenia
+          echo "CONFIG_TARGET_${TARGET}=y"                                    > .config
+          echo "CONFIG_TARGET_${TARGET}_${SUBTARGET}=y"                      >> .config
+          echo "CONFIG_TARGET_${TARGET}_${SUBTARGET}_DEVICE_${PROFILE}=y"   >> .config
+
+          # Dodatkowe pakiety
           EXTRA_PKGS="${{ github.event.inputs.extra_packages }}"
           if [ -n "$EXTRA_PKGS" ]; then
             for pkg in $EXTRA_PKGS; do
               echo "CONFIG_PACKAGE_${pkg}=y" >> .config
             done
           fi
-          
-          make defconfig
-          
-          # PokaĹĽ wygenerowanÄ… konfiguracjÄ™ targetu
-          echo "--- Konfiguracja targetu ---"
-          grep "^CONFIG_TARGET" .config
 
-      - name: WyĹ›wietl konfiguracjÄ™ (diagnostyka)
-        run: |
-          echo "=== Cel kompilacji ==="
-          echo "Target:    $TARGET"
-          echo "Subtarget: $SUBTARGET"
-          echo "Profile:   $PROFILE"
-          echo "=== .config (pierwsze 40 linii) ==="
-          head -40 .config
+          make defconfig
+
+          echo "=== Aktywny target ==="
+          grep "^CONFIG_TARGET" .config
 
       - name: Pobieranie plikĂłw ĹşrĂłdĹ‚owych
         run: |
           make download -j$(nproc) V=s 2>&1 | tail -50
-          # SprawdĹş integralnoĹ›Ä‡ pobranych plikĂłw
+          # UsuĹ„ uszkodzone/niekompletne pliki (<1 KB)
           find dl -size -1024c -delete
 
-      - name: Kompilacja toolchaina i firmware
+      - name: Kompilacja (toolchain + firmware)
         run: |
           make -j$(nproc) V=s 2>&1 | tee build.log | tail -100
-          echo "=== Wynik kompilacji ==="
-          echo "Kod wyjĹ›cia: $?"
 
-      - name: Diagnostyka przy bĹ‚Ä™dzie (jeĹ›li kompilacja siÄ™ nie powiodĹ‚a)
+      - name: Logi bĹ‚Ä™dĂłw (tylko przy niepowodzeniu)
         if: failure()
         run: |
-          echo "=== Ostatnie 200 linii build.log ==="
-          tail -200 build.log
-          echo "=== Wolne miejsce na dysku ==="
+          echo "=== Ostatnie 300 linii build.log ==="
+          tail -300 build.log
           df -h
 
       - name: Zbieranie plikĂłw firmware
         if: success()
         run: |
-          mkdir -p collected_firmware
-          # Kopiuj obrazy firmware (bin, img, gz, itx, ubi)
-          find bin/targets/$TARGET/$SUBTARGET/ \
+          mkdir -p firmware
+          find bin/targets/${TARGET}/${SUBTARGET}/ \
             -type f \( -name "*.bin" -o -name "*.img" -o -name "*.img.gz" \
-                      -o -name "*.itx" -o -name "*.ubi" -o -name "*.trx" \) \
-            -exec cp {} collected_firmware/ \;
-          
-          echo "=== Znalezione pliki firmware ==="
-          ls -lh collected_firmware/ || echo "Brak plikĂłw firmware!"
-          
-          # Kopiuj teĹĽ profiles.json i config.buildinfo
-          cp bin/targets/$TARGET/$SUBTARGET/profiles.json collected_firmware/ 2>/dev/null || true
-          cp bin/targets/$TARGET/$SUBTARGET/config.buildinfo collected_firmware/ 2>/dev/null || true
+                      -o -name "*.ubi" -o -name "*.trx" \) \
+            -exec cp {} firmware/ \;
 
-      - name: Upload firmware jako GitHub Artifact
+          # Metadane kompilacji
+          cp bin/targets/${TARGET}/${SUBTARGET}/profiles.json  firmware/ 2>/dev/null || true
+          cp bin/targets/${TARGET}/${SUBTARGET}/config.buildinfo firmware/ 2>/dev/null || true
+
+          echo "=== Pliki firmware ==="
+          ls -lh firmware/
+
+      - name: Upload firmware â†’ GitHub Artifacts
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: openwrt-${{ env.TARGET }}-${{ env.SUBTARGET }}-${{ env.PROFILE }}-${{ github.run_number }}
-          path: collected_firmware/
+          name: "openwrt-${{ env.VERSION }}-${{ env.TARGET }}-${{ env.SUBTARGET }}-${{ env.PROFILE }}-build${{ github.run_number }}"
+          path: firmware/
           retention-days: 30
-          if-no-files-found: warn
+          if-no-files-found: error
 
       - name: Tworzenie GitHub Release (opcjonalne)
         if: success() && github.event.inputs.create_release == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: build-${{ github.run_number }}-${{ env.TARGET }}-${{ env.SUBTARGET }}
-          name: "OpenWrt ${{ env.TARGET }}/${{ env.SUBTARGET }} - Build #${{ github.run_number }}"
+          tag_name: "openwrt-${{ env.VERSION }}-build${{ github.run_number }}"
+          name: "OpenWrt ${{ env.VERSION }} | ${{ env.TARGET }}/${{ env.SUBTARGET }} | ${{ env.PROFILE }}"
           body: |
             ## OpenWrt Build
-            
-            | Parametr   | WartoĹ›Ä‡ |
-            |------------|---------|
-            | Target     | `${{ env.TARGET }}` |
-            | Subtarget  | `${{ env.SUBTARGET }}` |
-            | Profile    | `${{ env.PROFILE }}` |
-            | Commit     | `${{ github.sha }}` |
-            | Data       | `${{ github.event.repository.updated_at }}` |
-            
-            ### Dodatkowe pakiety
-            `${{ github.event.inputs.extra_packages || 'brak' }}`
-          files: collected_firmware/*
+
+            | Parametr         | WartoĹ›Ä‡ |
+            |------------------|---------|
+            | Wersja OpenWrt   | `${{ env.VERSION }}` |
+            | Target           | `${{ env.TARGET }}` |
+            | Subtarget        | `${{ env.SUBTARGET }}` |
+            | Profil           | `${{ env.PROFILE }}` |
+            | Dodatkowe pakiety| `${{ github.event.inputs.extra_packages || 'brak' }}` |
+            | Commit ĹşrĂłdĹ‚owy  | `${{ github.sha }}` |
+          files: firmware/*
           draft: false
           prerelease: false

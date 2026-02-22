@@ -71,6 +71,19 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
+      - name: Cache – toolchain (staging_dir)
+        uses: actions/cache@v4
+        with:
+          path: |
+            staging_dir/host
+            staging_dir/toolchain-*
+          key: openwrt-toolchain-${{ env.VERSION }}-${{ env.TARGET }}-${{ env.SUBTARGET }}
+
+      - name: Cache – pobrane źródła (dl/)
+        uses: actions/cache@v4
+        with:
+          path: dl/
+          key: openwrt-dl-${{ env.VERSION }}-${{ env.TARGET }}-${{ env.SUBTARGET }}
       - name: Generowanie .config
         run: |
           # Ustaw target, subtarget i profil urządzenia

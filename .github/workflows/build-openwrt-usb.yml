@@ -1,0 +1,196 @@
+name: Build OpenWrt (USB mod)
+
+on:
+  workflow_dispatch:
+    inputs:
+      openwrt_version:
+        description: 'Wersja OpenWrt (tag git, np. v22.03.7, v23.05.5)'
+        required: true
+        default: 'v22.03.7'
+      target:
+        description: 'Target (np. ramips, ath79, x86, mediatek)'
+        required: true
+        default: 'ramips'
+      subtarget:
+        description: 'Subtarget (np. mt76x8, mt7621, generic, 64)'
+        required: true
+        default: 'mt76x8'
+      profile:
+        description: 'Profil urządzenia (np. tplink_tl-wr841n-v13)'
+        required: true
+        default: 'tplink_tl-wr841n-v13'
+      extra_packages:
+        description: 'Dodatkowe pakiety oddzielone spacją (np. kmod-usb-storage kmod-fs-ext4). Zostaw puste jeśli nie potrzeba.'
+        required: false
+        default: ''
+      create_release:
+        description: 'Czy utworzyć GitHub Release z firmware?'
+        required: true
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+env:
+  VERSION: ${{ github.event.inputs.openwrt_version }}
+  TARGET: ${{ github.event.inputs.target }}
+  SUBTARGET: ${{ github.event.inputs.subtarget }}
+  PROFILE: ${{ github.event.inputs.profile }}
+
+jobs:
+  build:
+    name: "OpenWrt ${{ github.event.inputs.openwrt_version }} | ${{ github.event.inputs.target }}/${{ github.event.inputs.subtarget }} | ${{ github.event.inputs.profile }} | USB"
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout OpenWrt ${{ env.VERSION }}
+        uses: actions/checkout@v4
+        with:
+          repository: openwrt/openwrt
+          ref: ${{ env.VERSION }}
+          fetch-depth: 1
+
+      - name: Instalacja zależności systemowych
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses5-dev \
+            libssl-dev python3-distutils rsync unzip zlib1g-dev \
+            file wget qemu-utils
+
+      - name: Zwolnienie miejsca na dysku (~20 GB)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo apt-get autoremove -y && sudo apt-get clean
+          df -h
+
+      - name: Aktualizacja i instalacja feedów
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Generowanie .config
+        run: |
+          # Ustaw target, subtarget i profil urządzenia
+          echo "CONFIG_TARGET_${TARGET}=y"                                    > .config
+          echo "CONFIG_TARGET_${TARGET}_${SUBTARGET}=y"                      >> .config
+          echo "CONFIG_TARGET_${TARGET}_${SUBTARGET}_DEVICE_${PROFILE}=y"   >> .config
+
+          # Pakiety USB (wymagane do obsługi kontrolera EHCI/OHCI po USB modzie)
+          echo "CONFIG_PACKAGE_kmod-usb2=y"                                  >> .config
+          echo "CONFIG_PACKAGE_kmod-usb-ledtrig-usbport=y"                  >> .config
+
+          # Dodatkowe pakiety podane przez użytkownika
+          EXTRA_PKGS="${{ github.event.inputs.extra_packages }}"
+          if [ -n "$EXTRA_PKGS" ]; then
+            for pkg in $EXTRA_PKGS; do
+              echo "CONFIG_PACKAGE_${pkg}=y" >> .config
+            done
+          fi
+
+          make defconfig
+
+          echo "=== Aktywny target ==="
+          grep "^CONFIG_TARGET" .config
+          echo "=== Pakiety USB ==="
+          grep "^CONFIG_PACKAGE_kmod-usb" .config || echo "(brak – sprawdź nazwę pakietu)"
+
+      - name: Patch DTS – włączenie kontrolera USB (EHCI/OHCI)
+        run: |
+          # Zgodnie z: https://forum.openwrt.org/t/wr841n-v13-usb-mod/9098
+          # Chip MT7628AN posiada kontroler USB fizycznie, ale jest on wyłączony w DTS.
+          # Dodajemy wpisy enableujące EHCI (USB 2.0) i OHCI (USB 1.1 fallback).
+          DTS="target/linux/ramips/dts/TL-WR841NV13.dts"
+          if [ ! -f "$DTS" ]; then
+            echo "WARN: Plik DTS nie znaleziony pod $DTS – szukam alternatywnej ścieżki..."
+            DTS=$(find target/linux/ramips/dts/ -iname "*841*v13*" -o -iname "*841nv13*" | head -1)
+            if [ -z "$DTS" ]; then
+              echo "ERROR: Nie znaleziono pliku DTS dla WR841N v13!"
+              find target/linux/ramips/dts/ -name "*.dts" | grep -i 841 || true
+              exit 1
+            fi
+            echo "Znaleziono DTS: $DTS"
+          fi
+
+          # Sprawdź czy patch nie był już wcześniej zastosowany
+          if grep -q "ehci.*status.*okay" "$DTS"; then
+            echo "INFO: Patch EHCI już obecny w DTS – pomijam."
+          else
+            echo "" >> "$DTS"
+            echo "/* USB mod patch – enable EHCI (USB 2.0) and OHCI (USB 1.1) */" >> "$DTS"
+            echo "&ehci { status = \"okay\"; };" >> "$DTS"
+            echo "&ohci { status = \"okay\"; };" >> "$DTS"
+            echo "INFO: Patch DTS zastosowany pomyślnie."
+          fi
+
+          echo "=== Ostatnie 8 linii pliku DTS ==="
+          tail -8 "$DTS"
+
+      - name: Pobieranie plików źródłowych
+        run: |
+          make download -j$(nproc) V=s 2>&1 | tail -50
+          # Usuń uszkodzone/niekompletne pliki (<1 KB)
+          find dl -size -1024c -delete
+
+      - name: Kompilacja (toolchain + firmware)
+        run: |
+          make -j$(nproc) V=s 2>&1 | tee build.log | tail -100
+
+      - name: Logi błędów (tylko przy niepowodzeniu)
+        if: failure()
+        run: |
+          echo "=== Ostatnie 300 linii build.log ==="
+          tail -300 build.log
+          df -h
+
+      - name: Zbieranie plików firmware
+        if: success()
+        run: |
+          mkdir -p firmware
+          find bin/targets/${TARGET}/${SUBTARGET}/ \
+            -type f \( -name "*.bin" -o -name "*.img" -o -name "*.img.gz" \
+                      -o -name "*.ubi" -o -name "*.trx" \) \
+            -exec cp {} firmware/ \;
+
+          # Metadane kompilacji
+          cp bin/targets/${TARGET}/${SUBTARGET}/profiles.json  firmware/ 2>/dev/null || true
+          cp bin/targets/${TARGET}/${SUBTARGET}/config.buildinfo firmware/ 2>/dev/null || true
+
+          echo "=== Pliki firmware ==="
+          ls -lh firmware/
+
+      - name: Upload firmware → GitHub Artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: "openwrt-${{ env.VERSION }}-${{ env.TARGET }}-${{ env.SUBTARGET }}-${{ env.PROFILE }}-usb-build${{ github.run_number }}"
+          path: firmware/
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Tworzenie GitHub Release (opcjonalne)
+        if: success() && github.event.inputs.create_release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "openwrt-${{ env.VERSION }}-usb-build${{ github.run_number }}"
+          name: "OpenWrt ${{ env.VERSION }} | ${{ env.TARGET }}/${{ env.SUBTARGET }} | ${{ env.PROFILE }} | USB mod"
+          body: |
+            ## OpenWrt Build – USB mod
+
+            Firmware skompilowany z włączonym kontrolerem USB (EHCI/OHCI) dla TL-WR841N v13.
+            Wymaga fizycznej modyfikacji płytki — zobacz: https://forum.openwrt.org/t/wr841n-v13-usb-mod/9098
+
+            | Parametr          | Wartość |
+            |-------------------|---------| 
+            | Wersja OpenWrt    | `${{ env.VERSION }}` |
+            | Target            | `${{ env.TARGET }}` |
+            | Subtarget         | `${{ env.SUBTARGET }}` |
+            | Profil            | `${{ env.PROFILE }}` |
+            | Pakiety USB       | `kmod-usb2 kmod-usb-ledtrig-usbport` |
+            | Dodatkowe pakiety | `${{ github.event.inputs.extra_packages || 'brak' }}` |
+            | Commit źródłowy   | `${{ github.sha }}` |
+          files: firmware/*
+          draft: false
+          prerelease: false

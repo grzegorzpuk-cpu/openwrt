@@ -16,15 +16,15 @@ on:
         required: true
         default: 'mt76x8'
       profile:
-        description: 'Profil urzÄ…dzenia (np. tplink_tl-wr841n-v13)'
+        description: 'Profil urządzenia (np. tplink_tl-wr841n-v13)'
         required: true
         default: 'tplink_tl-wr841n-v13'
       extra_packages:
-        description: 'Dodatkowe pakiety oddzielone spacjÄ… (np. luci htop). Zostaw puste jeĹ›li nie potrzeba.'
+        description: 'Dodatkowe pakiety oddzielone spacją (np. luci htop). Zostaw puste jeśli nie potrzeba.'
         required: false
         default: ''
       create_release:
-        description: 'Czy utworzyÄ‡ GitHub Release z firmware?'
+        description: 'Czy utworzyć GitHub Release z firmware?'
         required: true
         default: 'false'
         type: choice
@@ -47,12 +47,12 @@ jobs:
       - name: Checkout OpenWrt ${{ env.VERSION }}
         uses: actions/checkout@v4
         with:
-          # UĹĽyj oficjalnego tagu wersji - branch main forks nie zawiera poprawek stabilnych
+          # Użyj oficjalnego tagu wersji - branch main forks nie zawiera poprawek stabilnych
           repository: openwrt/openwrt
           ref: ${{ env.VERSION }}
           fetch-depth: 1
 
-      - name: Instalacja zaleĹĽnoĹ›ci systemowych
+      - name: Instalacja zależności systemowych
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -67,14 +67,28 @@ jobs:
           sudo apt-get autoremove -y && sudo apt-get clean
           df -h
 
-      - name: Aktualizacja i instalacja feedĂłw
+      - name: Aktualizacja i instalacja feedów
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
+      - name: Cache – toolchain (staging_dir)
+        uses: actions/cache@v4
+        with:
+          path: |
+            staging_dir/host
+            staging_dir/toolchain-*
+          key: openwrt-toolchain-${{ env.VERSION }}-${{ env.TARGET }}-${{ env.SUBTARGET }}
+
+      - name: Cache – pobrane źródła (dl/)
+        uses: actions/cache@v4
+        with:
+          path: dl/
+          key: openwrt-dl-${{ env.VERSION }}-${{ env.TARGET }}-${{ env.SUBTARGET }}
+
       - name: Generowanie .config
         run: |
-          # Ustaw target, subtarget i profil urzÄ…dzenia
+          # Ustaw target, subtarget i profil urządzenia
           echo "CONFIG_TARGET_${TARGET}=y"                                    > .config
           echo "CONFIG_TARGET_${TARGET}_${SUBTARGET}=y"                      >> .config
           echo "CONFIG_TARGET_${TARGET}_${SUBTARGET}_DEVICE_${PROFILE}=y"   >> .config
@@ -92,24 +106,24 @@ jobs:
           echo "=== Aktywny target ==="
           grep "^CONFIG_TARGET" .config
 
-      - name: Pobieranie plikĂłw ĹşrĂłdĹ‚owych
+      - name: Pobieranie plików źródłowych
         run: |
           make download -j$(nproc) V=s 2>&1 | tail -50
-          # UsuĹ„ uszkodzone/niekompletne pliki (<1 KB)
+          # Usuń uszkodzone/niekompletne pliki (<1 KB)
           find dl -size -1024c -delete
 
       - name: Kompilacja (toolchain + firmware)
         run: |
           make -j$(nproc) V=s 2>&1 | tee build.log | tail -100
 
-      - name: Logi bĹ‚Ä™dĂłw (tylko przy niepowodzeniu)
+      - name: Logi błędów (tylko przy niepowodzeniu)
         if: failure()
         run: |
           echo "=== Ostatnie 300 linii build.log ==="
           tail -300 build.log
           df -h
 
-      - name: Zbieranie plikĂłw firmware
+      - name: Zbieranie plików firmware
         if: success()
         run: |
           mkdir -p firmware
@@ -125,7 +139,7 @@ jobs:
           echo "=== Pliki firmware ==="
           ls -lh firmware/
 
-      - name: Upload firmware â†’ GitHub Artifacts
+      - name: Upload firmware → GitHub Artifacts
         if: success()
         uses: actions/upload-artifact@v4
         with:
@@ -143,14 +157,14 @@ jobs:
           body: |
             ## OpenWrt Build
 
-            | Parametr         | WartoĹ›Ä‡ |
-            |------------------|---------|
+            | Parametr         | Wartość |
+            |------------------|---------| 
             | Wersja OpenWrt   | `${{ env.VERSION }}` |
             | Target           | `${{ env.TARGET }}` |
             | Subtarget        | `${{ env.SUBTARGET }}` |
             | Profil           | `${{ env.PROFILE }}` |
             | Dodatkowe pakiety| `${{ github.event.inputs.extra_packages || 'brak' }}` |
-            | Commit ĹşrĂłdĹ‚owy  | `${{ github.sha }}` |
+            | Commit źródłowy  | `${{ github.sha }}` |
           files: firmware/*
           draft: false
           prerelease: false

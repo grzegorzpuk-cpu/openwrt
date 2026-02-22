@@ -166,38 +166,20 @@ jobs:
           head -3 "$DTS"
 
       # ──────────────────────────────────────────────────────────────
-      # PATCH 3: Aktualizacja IMAGE_SIZE i TPLINK_FLASHLAYOUT w mt76x8.mk
-      #   IMAGE_SIZE := 7808k  →  16000k
-      #   TPLINK_FLASHLAYOUT := 8Mmtk  →  16Mmtk
-      # (zmiana tylko w bloku Device/tplink_tl-wr841n-v13)
+      # PATCH 3 (USUNIĘTY): Zmiana IMAGE_SIZE i TPLINK_FLASHLAYOUT
+      # POWÓD: mktplinkfw2 w v22.03.7 nie obsługuje layout 16Mmtk
+      # → nie generuje żadnych plików .bin
+      # ROZWIĄZANIE: DTS z 16MB partition table wystarczy.
+      # Squashfs (7808k) mieści się w 16MB partycji.
+      # ZYSK: rootfs overlay używa pozostałych ~8MB wolnego miejsca.
       # ──────────────────────────────────────────────────────────────
-      - name: Patch 3 – Aktualizacja IMAGE_SIZE i FLASHLAYOUT w mt76x8.mk
-        run: |
-          MK="target/linux/ramips/image/mt76x8.mk"
-
-          if [ ! -f "$MK" ]; then
-            echo "ERROR: Nie znaleziono $MK"
-            exit 1
-          fi
-
-          # Zmień IMAGE_SIZE i FLASHLAYOUT tylko wewnątrz bloku WR841N v13
-          sed -i '/Device\/tplink_tl-wr841n-v13/,/endef/s/IMAGE_SIZE := 7808k/IMAGE_SIZE := 16000k/' "$MK"
-          sed -i '/Device\/tplink_tl-wr841n-v13/,/endef/s/TPLINK_FLASHLAYOUT := 8Mmtk/TPLINK_FLASHLAYOUT := 16Mmtk/' "$MK"
-
-          echo "=== Blok Device/tplink_tl-wr841n-v13 po patchu ==="
-          sed -n '/Device\/tplink_tl-wr841n-v13/,/endef/p' "$MK"
-
-          # Weryfikacja
-          grep -A20 "Device/tplink_tl-wr841n-v13" "$MK" | grep "IMAGE_SIZE" | grep "16000k" \
-            && echo "INFO: Patch 3 OK – IMAGE_SIZE = 16000k" \
-            || echo "WARN: IMAGE_SIZE nie zostalo zmienione – sprawdz mk!"
 
       # ──────────────────────────────────────────────────────────────
-      # PATCH 4: USB – włączenie EHCI (USB 2.0) i OHCI (USB 1.1)
+      # PATCH 3: USB – włączenie EHCI (USB 2.0) i OHCI (USB 1.1)
       # Zgodnie z: https://forum.openwrt.org/t/wr841n-v13-usb-mod/9098
       # DTS już zawiera &ehci { status = "disabled"; } – appendujemy "okay"
       # ──────────────────────────────────────────────────────────────
-      - name: Patch 4 – Włączenie kontrolera USB (EHCI/OHCI) w DTS
+      - name: Patch 3 – Włączenie kontrolera USB (EHCI/OHCI) w DTS
         run: |
           DTS="target/linux/ramips/dts/mt7628an_tplink_tl-wr841n-v13.dts"
 
@@ -278,7 +260,7 @@ jobs:
             | Target            | `${{ env.TARGET }}` |
             | Subtarget         | `${{ env.SUBTARGET }}` |
             | Profil            | `${{ env.PROFILE }}` |
-            | Flash             | `16MB (TPLINK_FLASHLAYOUT=16Mmtk, IMAGE_SIZE=16000k)` |
+            | Flash            | `16MB partition (DTS) – overlay używa ~8MB extra space` |
             | Pakiety USB       | `kmod-usb2 kmod-usb-ledtrig-usbport` |
             | Dodatkowe pakiety | `${{ github.event.inputs.extra_packages || 'brak' }}` |
             | Commit źródłowy   | `${{ github.sha }}` |

@@ -122,6 +122,7 @@ jobs:
 
       - name: Kompilacja (toolchain + firmware)
         run: |
+          set -o pipefail
           make -j$(nproc) V=s 2>&1 | tee build.log | tail -100
 
       - name: Logi błędów (tylko przy niepowodzeniu)

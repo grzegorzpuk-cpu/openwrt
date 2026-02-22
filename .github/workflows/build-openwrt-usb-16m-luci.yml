@@ -143,16 +143,11 @@ jobs:
             || sed -i 's|mt7628an_tplink_8m.dtsi|mt7628an_tplink_16m.dtsi|' "$DTS"
           head -3 "$DTS"
 
-      - name: Patch 3 – Aktualizacja IMAGE_SIZE i FLASHLAYOUT w mt76x8.mk
-        run: |
-          MK="target/linux/ramips/image/mt76x8.mk"
-          [ ! -f "$MK" ] && echo "ERROR: Brak $MK" && exit 1
-          sed -i '/Device\/tplink_tl-wr841n-v13/,/endef/s/IMAGE_SIZE := 7808k/IMAGE_SIZE := 16000k/' "$MK"
-          sed -i '/Device\/tplink_tl-wr841n-v13/,/endef/s/TPLINK_FLASHLAYOUT := 8Mmtk/TPLINK_FLASHLAYOUT := 16Mmtk/' "$MK"
-          echo "=== Blok WR841N v13 po patchu ==="
-          sed -n '/Device\/tplink_tl-wr841n-v13/,/endef/p' "$MK"
+      # Patch 3 (IMAGE_SIZE/FLASHLAYOUT) USUNIĘTY:
+      # mktplinkfw2 w v22.03.7 nie obsługuje layout 16Mmtk → brak .bin
+      # DTS z 16MB partition table wystarczy – overlay używa extra ~8MB.
 
-      - name: Patch 4 – Włączenie kontrolera USB (EHCI/OHCI) w DTS
+      - name: Patch 3 – Włączenie kontrolera USB (EHCI/OHCI) w DTS
         run: |
           DTS="target/linux/ramips/dts/mt7628an_tplink_tl-wr841n-v13.dts"
           if grep -q "ehci.*status.*okay" "$DTS"; then
@@ -226,7 +221,7 @@ jobs:
             | Target           | `${{ env.TARGET }}` |
             | Subtarget        | `${{ env.SUBTARGET }}` |
             | Profil           | `${{ env.PROFILE }}` |
-            | Flash            | `16MB (IMAGE_SIZE=16000k, FLASHLAYOUT=16Mmtk)` |
+            | Flash            | `16MB partition (DTS) – overlay ~8MB extra space` |
             | USB              | `kmod-usb2 kmod-usb-ledtrig-usbport` |
             | Interfejs        | `LuCI (język polski)` |
             | Usunięte pakiety | `ppp ppp-mod-pppoe` |

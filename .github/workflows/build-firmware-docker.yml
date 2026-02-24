@@ -80,16 +80,11 @@ jobs:
           echo "CONFIG_PACKAGE_ppp=n"                                         >> .config
           echo "CONFIG_PACKAGE_ppp-mod-pppoe=n"                              >> .config
           
-          # Wyłączenie IPv6
-          echo "CONFIG_IPV6=n"                                                >> .config
-          echo "CONFIG_PACKAGE_libip6tc=n"                                   >> .config
-          echo "CONFIG_PACKAGE_ip6tables=n"                                  >> .config
-          echo "CONFIG_PACKAGE_kmod-nf-conntrack6=n"                         >> .config
-          echo "CONFIG_PACKAGE_kmod-ipv6=n"                                  >> .config
+          # IPv6 pozostawiamy (domyślnie włączone)
           
-          # Wydajność: zRAM
-          echo "CONFIG_PACKAGE_zram-swap=y"                                   >> .config
-          echo "CONFIG_PACKAGE_kmod-zram=y"                                   >> .config
+          # Wydajność: zRAM wyłączamy (na prośbę)
+          echo "CONFIG_PACKAGE_zram-swap=n"                                   >> .config
+          echo "CONFIG_PACKAGE_kmod-zram=n"                                   >> .config
 
           EXTRA_PKGS="${{ github.event.inputs.extra_packages }}"
           if [ -n "$EXTRA_PKGS" ]; then

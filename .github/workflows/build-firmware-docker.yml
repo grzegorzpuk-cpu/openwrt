@@ -1,0 +1,168 @@
+name: Build Firmware via Docker (USB + 16M + LuCI PL)
+
+# Wymaga: wpierw uruchom "Build Docker Builder Image" aby obraz był w GHCR
+# Czas: ~15-20 min (zamiast 90 min - toolchain już skompilowany w obrazie)
+
+on:
+  workflow_dispatch:
+    inputs:
+      openwrt_version:
+        description: 'Wersja OpenWrt (musi pasować do obrazu Docker)'
+        required: true
+        default: 'v22.03.7'
+      target:
+        description: 'Target'
+        required: true
+        default: 'ramips'
+      subtarget:
+        description: 'Subtarget'
+        required: true
+        default: 'mt76x8'
+      profile:
+        description: 'Profil urządzenia'
+        required: true
+        default: 'tplink_tl-wr841n-v13'
+      extra_packages:
+        description: 'Dodatkowe pakiety (oddzielone spacją)'
+        required: false
+        default: ''
+      create_release:
+        description: 'Czy utworzyć GitHub Release?'
+        required: true
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+
+env:
+  VERSION:    ${{ github.event.inputs.openwrt_version }}
+  TARGET:     ${{ github.event.inputs.target }}
+  SUBTARGET:  ${{ github.event.inputs.subtarget }}
+  PROFILE:    ${{ github.event.inputs.profile }}
+  IMAGE:      ghcr.io/${{ github.repository_owner }}/openwrt-builder
+
+jobs:
+  build:
+    name: "Docker Firmware | ${{ github.event.inputs.openwrt_version }} | ${{ github.event.inputs.target }}/${{ github.event.inputs.subtarget }} | ${{ github.event.inputs.profile }}"
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+
+    container:
+      image: ghcr.io/${{ github.repository_owner }}/openwrt-builder:${{ github.event.inputs.openwrt_version }}-${{ github.event.inputs.target }}-${{ github.event.inputs.subtarget }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    defaults:
+      run:
+        working-directory: /openwrt
+
+    steps:
+      - name: Odświeżenie feedów (aktualizacja paczek w kontenerze)
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Generowanie .config
+        run: |
+          echo "CONFIG_TARGET_${TARGET}=y"                                    > .config
+          echo "CONFIG_TARGET_${TARGET}_${SUBTARGET}=y"                      >> .config
+          echo "CONFIG_TARGET_${TARGET}_${SUBTARGET}_DEVICE_${PROFILE}=y"   >> .config
+          echo "CONFIG_PACKAGE_kmod-usb2=y"                                  >> .config
+          echo "CONFIG_PACKAGE_kmod-usb-ledtrig-usbport=y"                  >> .config
+          echo "CONFIG_PACKAGE_luci=y"                                        >> .config
+          echo "CONFIG_PACKAGE_luci-i18n-base-pl=y"                          >> .config
+          echo "CONFIG_PACKAGE_ppp=n"                                         >> .config
+          echo "CONFIG_PACKAGE_ppp-mod-pppoe=n"                              >> .config
+
+          EXTRA_PKGS="${{ github.event.inputs.extra_packages }}"
+          if [ -n "$EXTRA_PKGS" ]; then
+            for pkg in $EXTRA_PKGS; do
+              echo "CONFIG_PACKAGE_${pkg}=y" >> .config
+            done
+          fi
+
+          make defconfig
+          echo "=== Target ===" && grep "^CONFIG_TARGET" .config
+          echo "=== USB ===" && grep "^CONFIG_PACKAGE_kmod-usb" .config || echo "(brak)"
+          echo "=== LuCI ===" && grep "^CONFIG_PACKAGE_luci" .config
+
+      - name: Patch 1 – Tworzenie mt7628an_tplink_16m.dtsi (flash 16MB)
+        run: |
+          DTSI_8M="target/linux/ramips/dts/mt7628an_tplink_8m.dtsi"
+          DTSI_16M="target/linux/ramips/dts/mt7628an_tplink_16m.dtsi"
+          [ ! -f "$DTSI_8M" ] && echo "ERROR: Brak $DTSI_8M" && exit 1
+          sed \
+            -e 's|reg = <0x20000 0x7a0000>|reg = <0x20000 0xfa0000>|' \
+            -e 's|reg = <0x7c0000 0x10000>|reg = <0xfc0000 0x10000>|' \
+            -e 's|reg = <0x7d0000 0x30000>|reg = <0xfd0000 0x30000>|' \
+            "$DTSI_8M" > "$DTSI_16M"
+          echo "=== Partycje 16MB ===" && grep "reg = " "$DTSI_16M"
+
+      - name: Patch 2 – Zmiana include DTS na 16m
+        run: |
+          DTS="target/linux/ramips/dts/mt7628an_tplink_tl-wr841n-v13.dts"
+          [ ! -f "$DTS" ] && echo "ERROR: Brak $DTS" && exit 1
+          grep -q "mt7628an_tplink_16m.dtsi" "$DTS" \
+            && echo "INFO: już zastosowany." \
+            || sed -i 's|mt7628an_tplink_8m.dtsi|mt7628an_tplink_16m.dtsi|' "$DTS"
+          head -3 "$DTS"
+
+      - name: Patch 3 – USB EHCI/OHCI w DTS
+        run: |
+          DTS="target/linux/ramips/dts/mt7628an_tplink_tl-wr841n-v13.dts"
+          if grep -q "ehci.*status.*okay" "$DTS"; then
+            echo "INFO: Patch USB już obecny."
+          else
+            { echo ""; echo "/* USB mod patch */";
+              echo "&ehci { status = \"okay\"; };";
+              echo "&ohci { status = \"okay\"; };" ; } >> "$DTS"
+            echo "INFO: Patch USB zastosowany."
+          fi
+          tail -6 "$DTS"
+
+      - name: Pobieranie brakujących źródeł
+        run: |
+          make download -j$(nproc) V=s 2>&1 | tail -20
+          find dl -size -1024c -delete
+
+      - name: Kompilacja firmware
+        run: |
+          set -o pipefail
+          make -j$(nproc) V=s 2>&1 | tee build.log | tail -80
+
+      - name: Logi błędów (tylko przy niepowodzeniu)
+        if: failure()
+        working-directory: /openwrt
+        run: tail -300 build.log
+
+      - name: Zbieranie plików firmware
+        if: success()
+        run: |
+          mkdir -p /github/workspace/firmware
+          find bin/targets/${TARGET}/${SUBTARGET}/ \
+            -type f \( -name "*.bin" -o -name "*.img" -o -name "*.img.gz" -o -name "*.ubi" \) \
+            -exec cp {} /github/workspace/firmware/ \;
+          cp bin/targets/${TARGET}/${SUBTARGET}/profiles.json  /github/workspace/firmware/ 2>/dev/null || true
+          cp bin/targets/${TARGET}/${SUBTARGET}/config.buildinfo /github/workspace/firmware/ 2>/dev/null || true
+          echo "=== Firmware ===" && ls -lh /github/workspace/firmware/
+
+      - name: Upload firmware → GitHub Artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: "docker-firmware-${{ env.VERSION }}-${{ env.TARGET }}-${{ env.SUBTARGET }}-${{ env.PROFILE }}-build${{ github.run_number }}"
+          path: /github/workspace/firmware/
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Tworzenie GitHub Release (opcjonalne)
+        if: success() && github.event.inputs.create_release == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "docker-openwrt-${{ env.VERSION }}-usb-16m-luci-build${{ github.run_number }}"
+          name: "OpenWrt ${{ env.VERSION }} | ${{ env.TARGET }}/${{ env.SUBTARGET }} | ${{ env.PROFILE }} | USB+16MB+LuCI (Docker)"
+          files: /github/workspace/firmware/*
+          draft: false
+          prerelease: false

@@ -23,7 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc-multilib g++-multilib gettext git libncurses5-dev \
     libssl-dev python3-distutils rsync unzip zlib1g-dev \
     file wget qemu-utils ca-certificates \
-  && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/*
 
 # ── Klonowanie OpenWrt ────────────────────────────────────────────────────────
 WORKDIR /openwrt
@@ -42,8 +42,14 @@ RUN echo "CONFIG_TARGET_${TARGET}=y"                  > .config && \
 RUN make download -j4 V=s 2>&1 | tail -20 && \
     find dl -size -1024c -delete
 
-# ── Kompilacja toolchaina (najdłuższy krok – ~30 min) ────────────────────────
-RUN make toolchain/compile -j$(nproc) V=s 2>&1 | tail -50
+# ── Budowa narzędzi hosta i toolchaina (najdłuższy krok – ~60 min) ──────────
+# Budujemy wszystko co potrzebne na hoście, aby uniknąć błędów na runnerze.
+RUN make defconfig
+RUN make tools/install -j$(nproc) V=s || make tools/install -j1 V=s
+RUN make toolchain/install -j$(nproc) V=s || make toolchain/install -j1 V=s
+
+# Czyszczenie zbędnych plików tymczasowych (opcjonalnie, ale oszczędza miejsce w obrazie)
+RUN rm -rf build_dir/host build_dir/toolchain-*
 
 # ── Katalog wyjściowy (tutaj lądują bin/) ─────────────────────────────────────
 VOLUME ["/openwrt/bin"]

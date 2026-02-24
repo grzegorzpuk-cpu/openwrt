@@ -178,6 +178,10 @@ jobs:
           tail -300 build.log
           df -h
 
+      # ──────────────────────────────────────────────────────────────────────
+      # FIRMWARE
+      # ──────────────────────────────────────────────────────────────────────
+
       - name: Zbieranie plików firmware
         if: success()
         run: |
@@ -203,6 +207,128 @@ jobs:
           path: firmware/
           retention-days: 30
           if-no-files-found: error
+
+      # ──────────────────────────────────────────────────────────────────────
+      # PACZKI IPK
+      # ──────────────────────────────────────────────────────────────────────
+
+      - name: Zbieranie i segregacja paczek IPK
+        if: success()
+        run: |
+          PKGROOT="packages-ipk"
+          mkdir -p "$PKGROOT"/{kmod,base,luci,packages,routing,other}
+
+          # 1) Moduły jądra – kmod-*.ipk z bin/targets/.../packages/
+          #    WAŻNE: kmod musi pochodzić z tego samego buildu co firmware!
+          find bin/targets/${TARGET}/${SUBTARGET}/packages/ \
+            -name "kmod-*.ipk" -exec cp {} "$PKGROOT/kmod/" \; 2>/dev/null || true
+
+          # 2) Pozostałe paczki target (nie-kmod) → other/
+          find bin/targets/${TARGET}/${SUBTARGET}/packages/ \
+            -name "*.ipk" ! -name "kmod-*.ipk" \
+            -exec cp {} "$PKGROOT/other/" \; 2>/dev/null || true
+
+          # 3) Paczki z bin/packages/<arch>/<feed>/  (base, luci, packages, routing)
+          for feed_dir in bin/packages/*/; do
+            for feed in base luci packages routing; do
+              src="${feed_dir}${feed}"
+              [ -d "$src" ] || continue
+              find "$src" -name "*.ipk" \
+                -exec cp {} "$PKGROOT/$feed/" \; 2>/dev/null || true
+            done
+            # Nieznane feedy → other/
+            find "$feed_dir" -maxdepth 2 -name "*.ipk" \
+              ! -path "*/base/*" ! -path "*/luci/*" \
+              ! -path "*/packages/*" ! -path "*/routing/*" \
+              -exec cp {} "$PKGROOT/other/" \; 2>/dev/null || true
+          done
+
+          echo "=== Podsumowanie paczek ==="
+          total=0
+          for dir in "$PKGROOT"/*/; do
+            count=$(ls "$dir"*.ipk 2>/dev/null | wc -l)
+            total=$((total + count))
+            printf "  %-12s %3d paczek\n" "$(basename $dir)/" "$count"
+          done
+          echo "  ────────────────────────"
+          echo "  RAZEM:       $total paczek"
+
+      - name: Generowanie manifestu paczek (packages.txt + packages.json)
+        if: success()
+        run: |
+          PKGROOT="packages-ipk"
+          BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          RUN="${{ github.run_number }}"
+          VER="${{ env.VERSION }}"
+          TGT="${{ env.TARGET }}/${{ env.SUBTARGET }}"
+          PROF="${{ env.PROFILE }}"
+          SHA="${{ github.sha }}"
+
+          # ── packages.txt (czytelna lista dla człowieka) ──────────────────
+          {
+            echo "OpenWrt IPK Packages – Build #${RUN}"
+            echo "Version : ${VER}   Target: ${TGT}   Profile: ${PROF}"
+            echo "Built   : ${BUILD_DATE}   Commit: ${SHA}"
+            echo "================================================================"
+            for dir in "$PKGROOT"/*/; do
+              feed=$(basename "$dir")
+              echo ""
+              echo "--- ${feed}/ ---"
+              ipk_list=$(ls "$dir"*.ipk 2>/dev/null)
+              if [ -n "$ipk_list" ]; then
+                ls -lh "$dir"*.ipk \
+                  | awk '{printf "  %-8s %s\n", $5, $9}' \
+                  | sed "s|${PKGROOT}/${feed}/||"
+              else
+                echo "  (brak)"
+              fi
+            done
+          } > "$PKGROOT/packages.txt"
+
+          # ── packages.json (manifest maszynowy) ───────────────────────────
+          {
+            echo "{"
+            echo "  \"build_number\": ${RUN},"
+            echo "  \"version\": \"${VER}\","
+            echo "  \"target\": \"${{ env.TARGET }}\","
+            echo "  \"subtarget\": \"${{ env.SUBTARGET }}\","
+            echo "  \"profile\": \"${PROF}\","
+            echo "  \"built_at\": \"${BUILD_DATE}\","
+            echo "  \"commit\": \"${SHA}\","
+            echo "  \"feeds\": {"
+            first=true
+            for dir in "$PKGROOT"/*/; do
+              feed=$(basename "$dir")
+              count=$(ls "$dir"*.ipk 2>/dev/null | wc -l)
+              $first || printf ","
+              printf "\n    \"%s\": %d" "$feed" "$count"
+              first=false
+            done
+            echo ""
+            echo "  }"
+            echo "}"
+          } > "$PKGROOT/packages.json"
+
+          echo "=== packages.txt (pierwsze 40 linii) ==="
+          head -40 "$PKGROOT/packages.txt"
+          echo ""
+          echo "=== packages.json ==="
+          cat "$PKGROOT/packages.json"
+
+      - name: Upload paczek IPK → GitHub Artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          # Nazwa: packages-ipk-<version>-<target>-<subtarget>-build<N>
+          name: "packages-ipk-${{ env.VERSION }}-${{ env.TARGET }}-${{ env.SUBTARGET }}-build${{ github.run_number }}"
+          path: packages-ipk/
+          retention-days: 30
+          # warn zamiast error – build nie failuje jeśli jakiś feed był pusty
+          if-no-files-found: warn
+
+      # ──────────────────────────────────────────────────────────────────────
+      # GITHUB RELEASE (opcjonalne)
+      # ──────────────────────────────────────────────────────────────────────
 
       - name: Tworzenie GitHub Release (opcjonalne)
         if: success() && github.event.inputs.create_release == 'true'

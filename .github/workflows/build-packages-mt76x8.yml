@@ -1,0 +1,228 @@
+name: Build Packages IPK (ramips/mt76x8)
+
+on:
+  workflow_dispatch:
+    inputs:
+      openwrt_version:
+        description: 'Wersja OpenWrt (tag git, np. v22.03.7)'
+        required: true
+        default: 'v22.03.7'
+      target:
+        description: 'Target'
+        required: true
+        default: 'ramips'
+      subtarget:
+        description: 'Subtarget'
+        required: true
+        default: 'mt76x8'
+      feeds_to_build:
+        description: 'Feedy do zbudowania (all = wszystkie; lub np. base luci packages)'
+        required: true
+        default: 'all'
+
+env:
+  VERSION: ${{ github.event.inputs.openwrt_version }}
+  TARGET:  ${{ github.event.inputs.target }}
+  SUBTARGET: ${{ github.event.inputs.subtarget }}
+
+jobs:
+  build-packages:
+    name: "Packages | ${{ github.event.inputs.openwrt_version }} | ${{ github.event.inputs.target }}/${{ github.event.inputs.subtarget }}"
+    runs-on: ubuntu-22.04
+    timeout-minutes: 340   # 5h 40min – bezpiecznie poniżej limitu 6h
+
+    steps:
+      - name: Checkout OpenWrt ${{ env.VERSION }}
+        uses: actions/checkout@v4
+        with:
+          repository: openwrt/openwrt
+          ref: ${{ env.VERSION }}
+          fetch-depth: 1
+
+      - name: Instalacja zależności systemowych
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses5-dev \
+            libssl-dev python3-distutils rsync unzip zlib1g-dev \
+            file wget qemu-utils
+
+      - name: Zwolnienie miejsca na dysku (~20 GB)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo apt-get autoremove -y && sudo apt-get clean
+          df -h
+
+      - name: Aktualizacja i instalacja feedów
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Cache – toolchain (staging_dir)
+        uses: actions/cache@v4
+        with:
+          path: |
+            staging_dir/host
+            staging_dir/toolchain-*
+          key: openwrt-toolchain-${{ env.VERSION }}-${{ env.TARGET }}-${{ env.SUBTARGET }}
+
+      - name: Cache – pobrane źródła (dl/)
+        uses: actions/cache@v4
+        with:
+          path: dl/
+          key: openwrt-dl-${{ env.VERSION }}-${{ env.TARGET }}-${{ env.SUBTARGET }}
+
+      - name: Generowanie .config (wszystkie paczki)
+        run: |
+          # Target
+          echo "CONFIG_TARGET_${TARGET}=y"                               > .config
+          echo "CONFIG_TARGET_${TARGET}_${SUBTARGET}=y"                >> .config
+
+          # Buduj WSZYSTKIE nieudostępnione paczki z feedów
+          echo "CONFIG_ALL_NONSHARED=y"                                 >> .config
+          # Buduj WSZYSTKIE moduły jądra dla tego targetu
+          echo "CONFIG_ALL_KMODS=y"                                     >> .config
+
+          # Wyłącz tworzenie obrazu firmware (oszczędność miejsca i czasu)
+          echo "CONFIG_TARGET_ROOTFS_TARGZ=n"                          >> .config
+          echo "CONFIG_TARGET_ROOTFS_SQUASHFS=n"                       >> .config
+
+          make defconfig
+
+          echo "=== Liczba pakietów do zbudowania ==="
+          grep "^CONFIG_PACKAGE_.*=y" .config | wc -l
+          echo "=== Target ==="
+          grep "^CONFIG_TARGET" .config | head -5
+
+      - name: Pobieranie plików źródłowych
+        run: |
+          make download -j$(nproc) V=s 2>&1 | tail -30
+          find dl -size -1024c -delete
+
+      - name: Kompilacja toolchaina
+        run: |
+          make toolchain/compile -j$(nproc) V=s 2>&1 | tail -50
+
+      - name: Kompilacja WSZYSTKICH paczek
+        run: |
+          set -o pipefail
+          make package/compile -j$(nproc) V=s 2>&1 | tee build-packages.log | tail -100
+
+      - name: Logi błędów (tylko przy niepowodzeniu)
+        if: failure()
+        run: |
+          echo "=== Ostatnie 300 linii build-packages.log ==="
+          tail -300 build-packages.log
+          df -h
+
+      # ──────────────────────────────────────────────────────────────────────
+      # ZBIERANIE PACZEK
+      # ──────────────────────────────────────────────────────────────────────
+
+      - name: Zbieranie i segregacja paczek IPK
+        if: success()
+        run: |
+          PKGROOT="packages-ipk"
+          mkdir -p "$PKGROOT"/{kmod,base,luci,packages,routing,telephony,other}
+
+          # 1) Moduły jądra z bin/targets/../packages/
+          find bin/targets/${TARGET}/${SUBTARGET}/packages/ \
+            -name "kmod-*.ipk" -exec cp {} "$PKGROOT/kmod/" \; 2>/dev/null || true
+
+          # 2) Paczki z bin/packages/<arch>/<feed>/
+          for feed_dir in bin/packages/*/; do
+            for feed in base luci packages routing telephony; do
+              src="${feed_dir}${feed}"
+              [ -d "$src" ] || continue
+              find "$src" -name "*.ipk" \
+                -exec cp {} "$PKGROOT/$feed/" \; 2>/dev/null || true
+            done
+            # Nieznane feedy → other/
+            find "$feed_dir" -maxdepth 2 -name "*.ipk" \
+              ! -path "*/base/*"      ! -path "*/luci/*" \
+              ! -path "*/packages/*" ! -path "*/routing/*" \
+              ! -path "*/telephony/*" \
+              -exec cp {} "$PKGROOT/other/" \; 2>/dev/null || true
+          done
+
+          # 3) Pozostałe paczki target (nie-kmod) → other/
+          find bin/targets/${TARGET}/${SUBTARGET}/packages/ \
+            -name "*.ipk" ! -name "kmod-*.ipk" \
+            -exec cp {} "$PKGROOT/other/" \; 2>/dev/null || true
+
+          echo "=== Podsumowanie paczek ==="
+          total=0
+          for dir in "$PKGROOT"/*/; do
+            shopt -s nullglob; arr=("$dir"*.ipk); shopt -u nullglob
+            count=${#arr[@]}
+            total=$((total + count))
+            printf "  %-14s %4d paczek\n" "$(basename $dir)/" "$count"
+          done
+          echo "  ──────────────────────────"
+          printf "  %-14s %4d paczek\n" "RAZEM:" "$total"
+
+      - name: Generowanie manifestu paczek (packages.txt + packages.json)
+        if: success()
+        run: |
+          PKGROOT="packages-ipk"
+          BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          # ── packages.txt ────────────────────────────────────────────────
+          {
+            echo "OpenWrt ALL Packages – Build #${{ github.run_number }}"
+            echo "Version : ${{ env.VERSION }}   Target: ${{ env.TARGET }}/${{ env.SUBTARGET }}"
+            echo "Built   : ${BUILD_DATE}   Commit: ${{ github.sha }}"
+            echo "================================================================"
+            for dir in "$PKGROOT"/*/; do
+              feed=$(basename "$dir")
+              echo ""
+              echo "--- ${feed}/ ---"
+              shopt -s nullglob; ipk_files=("$dir"*.ipk); shopt -u nullglob
+              if [ ${#ipk_files[@]} -gt 0 ]; then
+                ls -lh "${ipk_files[@]}" \
+                  | awk '{printf "  %-8s %s\n", $5, $NF}' \
+                  | sed "s|${PKGROOT}/${feed}/||"
+              else
+                echo "  (brak)"
+              fi
+            done
+          } > "$PKGROOT/packages.txt"
+
+          # ── packages.json ───────────────────────────────────────────────
+          {
+            echo "{"
+            echo "  \"build_number\": ${{ github.run_number }},"
+            echo "  \"version\": \"${{ env.VERSION }}\","
+            echo "  \"target\": \"${{ env.TARGET }}\","
+            echo "  \"subtarget\": \"${{ env.SUBTARGET }}\","
+            echo "  \"built_at\": \"${BUILD_DATE}\","
+            echo "  \"commit\": \"${{ github.sha }}\","
+            echo "  \"feeds\": {"
+            sep=""
+            for dir in "$PKGROOT"/*/; do
+              feed=$(basename "$dir")
+              shopt -s nullglob; ipk_arr=("$dir"*.ipk); shopt -u nullglob
+              count=${#ipk_arr[@]}
+              printf '%s\n    "%s": %d' "$sep" "$feed" "$count"
+              sep=","
+            done
+            echo ""
+            echo "  }"
+            echo "}"
+          } > "$PKGROOT/packages.json"
+
+          echo "=== packages.json ==="
+          cat "$PKGROOT/packages.json"
+          echo ""
+          echo "=== packages.txt (pierwsze 30 linii) ==="
+          head -30 "$PKGROOT/packages.txt"
+
+      - name: Upload paczek IPK → GitHub Artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: "packages-all-${{ env.VERSION }}-${{ env.TARGET }}-${{ env.SUBTARGET }}-build${{ github.run_number }}"
+          path: packages-ipk/
+          retention-days: 30
+          if-no-files-found: warn

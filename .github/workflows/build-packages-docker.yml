@@ -1,0 +1,154 @@
+name: Build Packages via Docker (ramips/mt76x8)
+
+# Wymaga: wpierw uruchom "Build Docker Builder Image" aby obraz był w GHCR
+# Czas: ~45-60 min (zamiast 3-4h - toolchain już skompilowany w obrazie)
+
+on:
+  workflow_dispatch:
+    inputs:
+      openwrt_version:
+        description: 'Wersja OpenWrt (musi pasować do obrazu Docker)'
+        required: true
+        default: 'v22.03.7'
+      target:
+        description: 'Target'
+        required: true
+        default: 'ramips'
+      subtarget:
+        description: 'Subtarget'
+        required: true
+        default: 'mt76x8'
+
+env:
+  VERSION:   ${{ github.event.inputs.openwrt_version }}
+  TARGET:    ${{ github.event.inputs.target }}
+  SUBTARGET: ${{ github.event.inputs.subtarget }}
+
+jobs:
+  build-packages:
+    name: "Docker Packages | ${{ github.event.inputs.openwrt_version }} | ${{ github.event.inputs.target }}/${{ github.event.inputs.subtarget }}"
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
+    container:
+      image: ghcr.io/${{ github.repository_owner }}/openwrt-builder:${{ github.event.inputs.openwrt_version }}-${{ github.event.inputs.target }}-${{ github.event.inputs.subtarget }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    defaults:
+      run:
+        working-directory: /openwrt
+
+    steps:
+      - name: Odświeżenie feedów
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Generowanie .config (wszystkie paczki)
+        run: |
+          echo "CONFIG_TARGET_${TARGET}=y"         > .config
+          echo "CONFIG_TARGET_${TARGET}_${SUBTARGET}=y" >> .config
+          echo "CONFIG_ALL_NONSHARED=y"            >> .config
+          echo "CONFIG_ALL_KMODS=y"                >> .config
+          echo "CONFIG_TARGET_ROOTFS_TARGZ=n"      >> .config
+          echo "CONFIG_TARGET_ROOTFS_SQUASHFS=n"   >> .config
+          make defconfig
+          echo "=== Liczba pakietów do zbudowania ==="
+          grep "^CONFIG_PACKAGE_.*=y" .config | wc -l
+
+      - name: Pobieranie brakujących źródeł
+        run: |
+          make download -j$(nproc) V=s 2>&1 | tail -20
+          find dl -size -1024c -delete
+
+      - name: Kompilacja WSZYSTKICH paczek
+        run: |
+          set -o pipefail
+          make package/compile -j$(nproc) V=s 2>&1 | tee build-packages.log | tail -80
+
+      - name: Logi błędów (tylko przy niepowodzeniu)
+        if: failure()
+        run: tail -300 build-packages.log
+
+      - name: Zbieranie i segregacja paczek IPK
+        if: success()
+        run: |
+          PKGROOT="/github/workspace/packages-ipk"
+          mkdir -p "$PKGROOT"/{kmod,base,luci,packages,routing,telephony,other}
+
+          find bin/targets/${TARGET}/${SUBTARGET}/packages/ \
+            -name "kmod-*.ipk" -exec cp {} "$PKGROOT/kmod/" \; 2>/dev/null || true
+
+          for feed_dir in bin/packages/*/; do
+            for feed in base luci packages routing telephony; do
+              src="${feed_dir}${feed}"
+              [ -d "$src" ] || continue
+              find "$src" -name "*.ipk" -exec cp {} "$PKGROOT/$feed/" \; 2>/dev/null || true
+            done
+            find "$feed_dir" -maxdepth 2 -name "*.ipk" \
+              ! -path "*/base/*" ! -path "*/luci/*" ! -path "*/packages/*" \
+              ! -path "*/routing/*" ! -path "*/telephony/*" \
+              -exec cp {} "$PKGROOT/other/" \; 2>/dev/null || true
+          done
+
+          find bin/targets/${TARGET}/${SUBTARGET}/packages/ \
+            -name "*.ipk" ! -name "kmod-*.ipk" \
+            -exec cp {} "$PKGROOT/other/" \; 2>/dev/null || true
+
+          echo "=== Podsumowanie paczek ==="
+          total=0
+          for dir in "$PKGROOT"/*/; do
+            shopt -s nullglob; arr=("$dir"*.ipk); shopt -u nullglob
+            count=${#arr[@]}; total=$((total + count))
+            printf "  %-14s %4d paczek\n" "$(basename $dir)/" "$count"
+          done
+          printf "  %-14s %4d paczek\n" "RAZEM:" "$total"
+
+      - name: Generowanie manifestu paczek
+        if: success()
+        run: |
+          PKGROOT="/github/workspace/packages-ipk"
+          BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          {
+            echo "OpenWrt ALL Packages (Docker) – Build #${{ github.run_number }}"
+            echo "Version : ${{ env.VERSION }}   Target: ${{ env.TARGET }}/${{ env.SUBTARGET }}"
+            echo "Built   : ${BUILD_DATE}   Commit: ${{ github.sha }}"
+            echo "================================================================"
+            for dir in "$PKGROOT"/*/; do
+              feed=$(basename "$dir")
+              echo ""; echo "--- ${feed}/ ---"
+              shopt -s nullglob; ipk_files=("$dir"*.ipk); shopt -u nullglob
+              if [ ${#ipk_files[@]} -gt 0 ]; then
+                ls -lh "${ipk_files[@]}" | awk '{printf "  %-8s %s\n", $5, $NF}' | sed "s|${PKGROOT}/${feed}/||"
+              else echo "  (brak)"; fi
+            done
+          } > "$PKGROOT/packages.txt"
+          {
+            echo "{"
+            echo "  \"build_number\": ${{ github.run_number }},"
+            echo "  \"version\": \"${{ env.VERSION }}\","
+            echo "  \"target\": \"${{ env.TARGET }}\","
+            echo "  \"subtarget\": \"${{ env.SUBTARGET }}\","
+            echo "  \"built_at\": \"${BUILD_DATE}\","
+            echo "  \"feeds\": {"
+            sep=""
+            for dir in "$PKGROOT"/*/; do
+              feed=$(basename "$dir")
+              shopt -s nullglob; ipk_arr=("$dir"*.ipk); shopt -u nullglob
+              count=${#ipk_arr[@]}
+              printf '%s\n    "%s": %d' "$sep" "$feed" "$count"; sep=","
+            done
+            echo ""; echo "  }"; echo "}"
+          } > "$PKGROOT/packages.json"
+          cat "$PKGROOT/packages.json"
+
+      - name: Upload paczek IPK → GitHub Artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: "docker-packages-all-${{ env.VERSION }}-${{ env.TARGET }}-${{ env.SUBTARGET }}-build${{ github.run_number }}"
+          path: /github/workspace/packages-ipk/
+          retention-days: 30
+          if-no-files-found: warn

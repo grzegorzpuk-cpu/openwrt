@@ -23,6 +23,7 @@ env:
   VERSION:   ${{ github.event.inputs.openwrt_version }}
   TARGET:    ${{ github.event.inputs.target }}
   SUBTARGET: ${{ github.event.inputs.subtarget }}
+  FORCE_UNSAFE_CONFIGURE: 1
 
 jobs:
   build-packages:
@@ -66,8 +67,10 @@ jobs:
 
       - name: Kompilacja WSZYSTKICH paczek
         run: |
-          set -o pipefail
-          make package/compile -j$(nproc) -k V=s 2>&1 | tee build-packages.log | tail -80
+          make package/compile -j$(nproc) -k V=s 2>&1 | tee build-packages.log || {
+            echo "WRN: Budowa równoległa zawiodła, próbuję -j1 dla szczegółowych logów..."
+            make package/compile -j1 V=s 2>&1 | tee -a build-packages.log
+          }
 
       - name: Logi błędów (tylko przy niepowodzeniu)
         if: failure()

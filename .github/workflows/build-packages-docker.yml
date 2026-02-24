@@ -39,6 +39,7 @@ jobs:
     defaults:
       run:
         working-directory: /openwrt
+        shell: bash
 
     steps:
       - name: Odświeżenie feedów
@@ -66,7 +67,7 @@ jobs:
       - name: Kompilacja WSZYSTKICH paczek
         run: |
           set -o pipefail
-          make package/compile -j$(nproc) V=s 2>&1 | tee build-packages.log | tail -80
+          make package/compile -j$(nproc) -k V=s 2>&1 | tee build-packages.log | tail -80
 
       - name: Logi błędów (tylko przy niepowodzeniu)
         if: failure()

@@ -57,6 +57,7 @@ jobs:
     defaults:
       run:
         working-directory: /openwrt
+        shell: bash
 
     steps:
       - name: Odświeżenie feedów (aktualizacja paczek w kontenerze)

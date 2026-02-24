@@ -274,10 +274,12 @@ jobs:
               feed=$(basename "$dir")
               echo ""
               echo "--- ${feed}/ ---"
-              ipk_list=$(ls "$dir"*.ipk 2>/dev/null)
-              if [ -n "$ipk_list" ]; then
-                ls -lh "$dir"*.ipk \
-                  | awk '{printf "  %-8s %s\n", $5, $9}' \
+              shopt -s nullglob
+              ipk_files=("$dir"*.ipk)
+              shopt -u nullglob
+              if [ ${#ipk_files[@]} -gt 0 ]; then
+                ls -lh "${ipk_files[@]}" \
+                  | awk '{printf "  %-8s %s\n", $5, $NF}' \
                   | sed "s|${PKGROOT}/${feed}/||"
               else
                 echo "  (brak)"
@@ -296,13 +298,13 @@ jobs:
             echo "  \"built_at\": \"${BUILD_DATE}\","
             echo "  \"commit\": \"${SHA}\","
             echo "  \"feeds\": {"
-            first=true
+            sep=""
             for dir in "$PKGROOT"/*/; do
               feed=$(basename "$dir")
-              count=$(ls "$dir"*.ipk 2>/dev/null | wc -l)
-              $first || printf ","
-              printf "\n    \"%s\": %d" "$feed" "$count"
-              first=false
+              shopt -s nullglob; ipk_arr=("$dir"*.ipk); shopt -u nullglob
+              count=${#ipk_arr[@]}
+              printf '%s\n    "%s": %d' "$sep" "$feed" "$count"
+              sep=","
             done
             echo ""
             echo "  }"
